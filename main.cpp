@@ -1,3 +1,5 @@
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -5,10 +7,12 @@
 #include <sys/types.h>
 #include <sys/ipc.h>
 #include <sys/sem.h>
+#include <sys/shm.h>
 #include <sys/wait.h>
 
 #include <ctime>
 #include <thread>
+#include <cstring>
 
 
 #define MAX_RETRIES 10
@@ -31,6 +35,7 @@ public:
     {
         if (m_taken)
         {
+            printf ("Automatic release\n");
             release ();
         }
     }
@@ -151,9 +156,159 @@ private:
 
 
 
+struct MyData
+{
+    char name [50];
+    char surname [50];
+    int age;
+};
+
+struct PcInfo 
+{
+    char manufacturer [50];
+    char model [50];
+    int generation;
+};
+
+
+
+
+
+class SharedMemorySegment
+{
+
+public:
+
+    bool init (const char* filename)
+    {
+        m_size = sizeof (MyData) + sizeof (PcInfo);
+
+        key_t key;
+        if ((key = ftok(filename, 'M')) == -1) {
+            perror("ftok");
+            return false;
+        }
+        if ((m_shmemId = shmget(key, m_size, 0644 | IPC_CREAT)) == -1) {
+            perror("shmget");
+            return false;
+        }
+        /* attach to the segment to get a pointer to it: */
+        m_dataPtr = (char *)shmat(m_shmemId, (void *)0, 0);
+
+        if (m_dataPtr == (char *)(-1)) {
+            perror("shmat");
+            detach ();
+            return false;
+        }
+        if (!m_semaphore.init (filename, 'S')) {
+            perror ("semaphore error");
+            detach ();
+            return false;
+        }
+
+        myData = (MyData*) &m_dataPtr[0];
+        pcInfo = (PcInfo*) &m_dataPtr[sizeof (MyData)];
+
+        return true;
+    }
+
+    bool detach ()
+    {
+        if (m_dataPtr == nullptr)
+            return false;
+
+        if (shmdt(m_dataPtr) == -1) {
+            perror("shmdt");
+            return false;
+        }
+        m_dataPtr = nullptr;
+        return true;
+    }
+
+    bool take () 
+    {
+        return m_semaphore.take ();
+    }
+
+
+    bool release () 
+    {
+        return m_semaphore.release ();
+    }
+
+
+    char operator[] (size_t offset)
+    {
+        return *(m_dataPtr + offset);
+    }
+
+public:
+
+    MyData* myData;
+    PcInfo* pcInfo;
+
+private:
+
+    int m_shmemId;
+    char * m_dataPtr;
+    size_t m_size;
+
+    Semaphore m_semaphore;
+};
+
+
 
 int main(void)
 {
+
+
+#if 1
+
+     int pid;
+
+    if ((pid = fork()) < 0) 
+    {
+        perror ("fork");
+        exit (1);
+    }
+    if (pid == 0) 
+    {
+        SharedMemorySegment sharedMemory;
+        if (!sharedMemory.init ("main.cpp")) {
+            exit (1);
+        }
+
+        sharedMemory.take ();
+
+        printf ("child read:\n");
+        printf ("%s %s is %d years old\n", sharedMemory.myData->name, sharedMemory.myData->surname, sharedMemory.myData->age);
+
+        sharedMemory.myData->age = 22;
+        strcpy (sharedMemory.myData->name, "Francesco");
+        strcpy (sharedMemory.myData->surname, "Gritti");
+        sharedMemory.release ();
+    }
+
+    else 
+    {
+        SharedMemorySegment sharedMemory;
+        if (!sharedMemory.init ("main.cpp")) {
+            exit (1);
+        }
+
+        sharedMemory.take ();
+
+        printf ("parent read:\n");
+        printf ("%s %s is %d years old\n", sharedMemory.myData->name, sharedMemory.myData->surname, sharedMemory.myData->age);
+
+        sharedMemory.myData->age = 47;
+        strcpy (sharedMemory.myData->name, "Pippo");
+        strcpy (sharedMemory.myData->surname, "Coca");
+        sharedMemory.release ();
+    }
+    
+#else
+
     int pid;
 
     if ((pid = fork()) < 0) 
@@ -194,6 +349,8 @@ int main(void)
         sleep (1);
         wait (NULL);
     }
+
+#endif
 
     return 0;
 }
